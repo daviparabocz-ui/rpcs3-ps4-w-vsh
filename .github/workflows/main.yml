@@ -129,7 +129,19 @@ jobs:
           Write-Host "Extraindo $($archive.Name)"
           if ($archive.Extension -eq ".zip") { Expand-Archive -Path $archive.FullName -DestinationPath $meshDir -Force }
           else { tar -xaf $archive.FullName -C $meshDir }
-          "MESA_BUNDLE_DIR=$bundleDir" >> $env:GITHUB_ENV
+          # O CMake espera <bundle>/include/vulkan/vulkan.h e <bundle>/build-orbis/src/amd/vulkan/libvulkan_radeon.a.
+          # O tar.gz pode ter (ou nao) uma pasta raiz, entao acha a raiz real pelo .a em vez de chutar o caminho.
+          $lib = Get-ChildItem -Path $meshDir -Recurse -File -Filter "libvulkan_radeon.a" |
+            Where-Object { ($_.FullName -replace '\\','/') -like "*/build-orbis/src/amd/vulkan/libvulkan_radeon.a" } |
+            Select-Object -First 1
+          if (-not $lib) {
+            Get-ChildItem -Path $meshDir -Recurse -Depth 3 | Select-Object -First 60 | ForEach-Object { Write-Host $_.FullName }
+            throw "libvulkan_radeon.a nao encontrado em build-orbis/src/amd/vulkan dentro do bundle - a estrutura do pacote mudou?"
+          }
+          $bundleRoot = ($lib.Directory.Parent.Parent.Parent.Parent.FullName -replace '\\','/')
+          if (-not (Test-Path "$bundleRoot/include/vulkan/vulkan.h")) { throw "include/vulkan/vulkan.h nao encontrado em $bundleRoot" }
+          Write-Host "MESA_BUNDLE_DIR = $bundleRoot"
+          "MESA_BUNDLE_DIR=$bundleRoot" >> $env:GITHUB_ENV
 
       - name: Grava o pin do submodulo do LLVM (precisa ser um git work tree)
         working-directory: ${{ env.PROJECT_ROOT }}/rpcs3-ps4
