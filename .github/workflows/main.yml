@@ -152,20 +152,42 @@ jobs:
           Write-Host "PS4_VERSION = $($m.Groups[1].Value)"
           "PS4_VERSION=$($m.Groups[1].Value)" >> $env:GITHUB_ENV
 
+      - name: Restaura cache do LLVM compilado
+        id: llvm-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ${{ env.PROJECT_ROOT }}/rpcs3-ps4/ps4-port/deps/llvm-project-${{ env.LLVM_SUBMODULE_PIN }}
+            ${{ env.PROJECT_ROOT }}/rpcs3-ps4/ps4-port/deps/llvm-project-${{ env.LLVM_SUBMODULE_PIN }}.tar.gz
+            ${{ env.PROJECT_ROOT }}/rpcs3-ps4/ps4-port/.build-llvm-host
+            ${{ env.PROJECT_ROOT }}/rpcs3-ps4/ps4-port/.build-llvm-orbis
+          key: llvm-orbis-${{ env.LLVM_SUBMODULE_PIN }}-${{ hashFiles('staging/**/ps4-port/prepare-llvm.py', 'staging/**/ps4-port/build-llvm.ps1', 'staging/**/ps4-port/llvm-toolchain.cmake', 'staging/**/ps4-port/compat/llvm_ps4_process.hpp') }}
+
       - name: Compila o LLVM pro console (passo 5 do BUILDING.md)
         working-directory: ${{ env.PROJECT_ROOT }}/rpcs3-ps4
         run: |
           ./ps4-port/build-llvm.ps1 -Sdk "$env:OPENORBIS_SDK" -CompilerBin "$env:LLVM_BIN" -Jobs 4
+
+      - name: Salva cache do LLVM compilado
+        if: steps.llvm-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ env.PROJECT_ROOT }}/rpcs3-ps4/ps4-port/deps/llvm-project-${{ env.LLVM_SUBMODULE_PIN }}
+            ${{ env.PROJECT_ROOT }}/rpcs3-ps4/ps4-port/deps/llvm-project-${{ env.LLVM_SUBMODULE_PIN }}.tar.gz
+            ${{ env.PROJECT_ROOT }}/rpcs3-ps4/ps4-port/.build-llvm-host
+            ${{ env.PROJECT_ROOT }}/rpcs3-ps4/ps4-port/.build-llvm-orbis
+          key: ${{ steps.llvm-cache.outputs.cache-primary-key }}
 
       - name: Configura o CMake (passo 6 do BUILDING.md)
         working-directory: ${{ env.PROJECT_ROOT }}/rpcs3-ps4
         run: |
           cmake -S . -B ps4-port/.build-abi -G Ninja `
             "-DCMAKE_MAKE_PROGRAM=$PWD/ps4-port/.build-tools/ninja.exe" `
-            -DRPCS3_PS4_PORT=ON `
-            -DCMAKE_TOOLCHAIN_FILE=ps4-port/toolchain.cmake `
+            "-DRPCS3_PS4_PORT=ON" `
+            "-DCMAKE_TOOLCHAIN_FILE=ps4-port/toolchain.cmake" `
             "-DRPCS3_PS4_SDK=$env:OPENORBIS_SDK" "-DRPCS3_PS4_LLVM_BIN=$env:LLVM_BIN" `
-            -DRPCS3_PS4_WITH_LLVM=ON `
+            "-DRPCS3_PS4_WITH_LLVM=ON" `
             "-DRPCS3_PS4_ORBIS_COMPAT=$env:PROJECT_ROOT/orbis-compat" `
             "-DRPCS3_PS4_PORTING_KIT=$env:PROJECT_PARENT/orbis-porting-kit" `
             "-DRPCS3_PS4_MESA_BUNDLE=$env:MESA_BUNDLE_DIR"
