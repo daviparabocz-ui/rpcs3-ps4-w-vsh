@@ -164,6 +164,20 @@ jobs:
           Write-Host "PS4_VERSION = $($m.Groups[1].Value)"
           "PS4_VERSION=$($m.Groups[1].Value)" >> $env:GITHUB_ENV
 
+      - name: Baixa o FFmpeg n8.1.1 (antes do ninja, pra nao clonar dentro do build)
+        working-directory: ${{ env.PROJECT_ROOT }}/rpcs3-ps4
+        run: |
+          $src = "ps4-port/deps/ffmpeg"
+          # Se sobrou uma pasta incompleta (sem 'configure'), apaga e clona de novo.
+          if (-not (Test-Path "$src/configure")) {
+            if (Test-Path $src) { Remove-Item $src -Recurse -Force }
+            git clone --depth 1 --branch n8.1.1 https://github.com/FFmpeg/FFmpeg.git $src
+            if ($LASTEXITCODE) { throw "Falha ao clonar o FFmpeg" }
+          }
+          $head = git -C $src rev-parse HEAD
+          Write-Host "FFmpeg HEAD = $head"
+          if ($head -ne "239f2c733de417201d7ad3b3b8b0d9b63285b2b1") { throw "Revisao inesperada do FFmpeg: $head" }
+
       - name: Restaura cache do LLVM compilado
         id: llvm-cache
         uses: actions/cache/restore@v4
