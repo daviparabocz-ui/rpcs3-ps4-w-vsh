@@ -65,15 +65,21 @@ jobs:
           "PROJECT_PARENT=$parent" >> $env:GITHUB_ENV
 
       - name: Baixa o OpenOrbis PS4 Toolchain v${{ env.OPENORBIS_VERSION }}
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $dest = "$env:RUNNER_TEMP/OpenOrbis"
           New-Item -ItemType Directory -Force -Path $dest | Out-Null
-          $url = "https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v${{ env.OPENORBIS_VERSION }}/v${{ env.OPENORBIS_VERSION }}.tar.gz"
-          Write-Host "Baixando $url"
-          Invoke-WebRequest -Uri $url -OutFile "$dest/openorbis.tar.gz"
-          tar -xzf "$dest/openorbis.tar.gz" -C $dest
+          # 0.1: usa o gh CLI em vez de montar a URL do asset na mao - a release pode ter mais de um
+          # arquivo e o nome exato nao e previsivel (ja quebrou uma vez chutando "vX.Y.Z.tar.gz").
+          gh release download "v${{ env.OPENORBIS_VERSION }}" --repo OpenOrbis/OpenOrbis-PS4-Toolchain --dir $dest --clobber
+          $archive = Get-ChildItem -Path $dest -File | Where-Object { $_.Extension -in ".zip", ".gz", ".tgz", ".xz" } | Select-Object -First 1
+          if (-not $archive) { throw "Nenhum arquivo compactado baixado da release v${{ env.OPENORBIS_VERSION }} - confira os assets em https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/tag/v${{ env.OPENORBIS_VERSION }}" }
+          Write-Host "Extraindo $($archive.Name)"
+          if ($archive.Extension -eq ".zip") { Expand-Archive -Path $archive.FullName -DestinationPath $dest -Force }
+          else { tar -xaf $archive.FullName -C $dest }
           $incOrbis = Get-ChildItem -Path $dest -Recurse -Directory -Filter "orbis" | Where-Object { $_.Parent.Name -eq "include" } | Select-Object -First 1
-          if (-not $incOrbis) { throw "Nao encontrei include/orbis dentro do toolchain baixado - a estrutura do tar.gz pode ter mudado." }
+          if (-not $incOrbis) { throw "Nao encontrei include/orbis dentro do toolchain extraido - a estrutura do pacote pode ter mudado." }
           $sdkRoot = $incOrbis.Parent.Parent.FullName
           Write-Host "OPENORBIS_SDK = $sdkRoot"
           "OPENORBIS_SDK=$sdkRoot" >> $env:GITHUB_ENV
@@ -108,14 +114,21 @@ jobs:
           git -C $dest checkout ${{ env.ORBIS_PORTING_KIT_COMMIT }}
 
       - name: Baixa o Mesa PS4 bundle (${{ env.ORBIS_MESA_TAG }})
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $bundleDir = "$env:PROJECT_PARENT/orbis-mesa-bundle"
           $meshDir = "$bundleDir/${{ env.ORBIS_MESA_TAG }}"
           New-Item -ItemType Directory -Force -Path $meshDir | Out-Null
-          $url = "https://github.com/orbis-ports/mesa-ps4/releases/download/${{ env.ORBIS_MESA_TAG }}/${{ env.ORBIS_MESA_TAG }}.tar.gz"
-          Write-Host "Baixando $url"
-          Invoke-WebRequest -Uri $url -OutFile "$meshDir/mesa.tar.gz"
-          tar -xzf "$meshDir/mesa.tar.gz" -C $meshDir
+          # 0.1: mesma logica do passo do OpenOrbis - a tag "${{ env.ORBIS_MESA_TAG }}" vem do texto do
+          # BUILDING.md (nao confirmei ao vivo), entao se a tag em si nao existir mais o erro abaixo
+          # avisa pra conferir https://github.com/orbis-ports/mesa-ps4/releases
+          gh release download "${{ env.ORBIS_MESA_TAG }}" --repo orbis-ports/mesa-ps4 --dir $meshDir --clobber
+          $archive = Get-ChildItem -Path $meshDir -File | Where-Object { $_.Extension -in ".zip", ".gz", ".tgz", ".xz" } | Select-Object -First 1
+          if (-not $archive) { throw "Nenhum arquivo compactado baixado da release ${{ env.ORBIS_MESA_TAG }} - confira a tag/assets em https://github.com/orbis-ports/mesa-ps4/releases" }
+          Write-Host "Extraindo $($archive.Name)"
+          if ($archive.Extension -eq ".zip") { Expand-Archive -Path $archive.FullName -DestinationPath $meshDir -Force }
+          else { tar -xaf $archive.FullName -C $meshDir }
           "MESA_BUNDLE_DIR=$bundleDir" >> $env:GITHUB_ENV
 
       - name: Grava o pin do submodulo do LLVM (precisa ser um git work tree)
@@ -176,4 +189,3 @@ jobs:
             ${{ env.PROJECT_ROOT }}/rpcs3-ps4/ps4-port/dist/*.sha256
             ${{ env.PROJECT_ROOT }}/rpcs3-ps4/ps4-port/dist/build-manifest-*.json
           if-no-files-found: error
-          
