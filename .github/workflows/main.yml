@@ -1,0 +1,179 @@
+name: Build RPCS3 PORT FOR PS4 (Boot VSH)
+
+# Dispara manualmente (aba Actions > Run workflow) ou toda vez que uma Release for publicada
+# (util se voce subir o .zip do projeto como asset da propria release).
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+env:
+  # --- Valores confirmados no BUILDING.md do proprio projeto / nas releases oficiais ---
+  OPENORBIS_VERSION: "0.5.4"
+  LLVM_MINGW_VERSION: "20240619"
+  LLVM_MINGW_FLAVOR: "llvm-mingw-20240619-ucrt-x86_64"
+  LLVM_SUBMODULE_PIN: "ca7933e47d3a3451d81e72ac174dcb5aa28b59d1" # 3rdparty/llvm/llvm gitlink (passo 3 do BUILDING.md)
+  ORBIS_PORTING_KIT_COMMIT: "213b0c38ff25ea7ca402c8844a6494086d0f1cae"
+  # --- Valor inferido do texto do BUILDING.md (tag da release = nome do asset); confira em
+  #     https://github.com/orbis-ports/mesa-ps4/releases se o download falhar ---
+  ORBIS_MESA_TAG: "orbis-mesa-4c934ebf9cda"
+  NINJA_VERSION: "1.12.1"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 350 # o build inteiro (LLVM console + FFmpeg + RPCS3 + port) é longo
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout do repositorio
+        uses: actions/checkout@v4
+
+      - name: Python 3.12+
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Confirma versao do CMake (precisa 3.28+)
+        run: |
+          cmake --version
+          $v = (cmake --version | Select-String -Pattern '(\d+)\.(\d+)').Matches[0]
+          if ([int]$v.Groups[1].Value -lt 3 -or ([int]$v.Groups[1].Value -eq 3 -and [int]$v.Groups[2].Value -lt 28)) {
+            throw "CMake do runner esta desatualizado (precisa 3.28+). Adicione um passo pra instalar uma versao mais nova."
+          }
+
+      - name: Acha e extrai o .zip do projeto (na raiz do repo, ou baixado da ultima Release)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $zip = Get-ChildItem -Path . -Filter *.zip -File | Select-Object -First 1
+          if (-not $zip) {
+            Write-Host "Nenhum .zip na raiz do repo - tentando baixar da ultima Release"
+            gh release download --repo $env:GITHUB_REPOSITORY --pattern "*.zip" --dir . 2>$null
+            $zip = Get-ChildItem -Path . -Filter *.zip -File | Select-Object -First 1
+          }
+          if (-not $zip) { throw "Nenhum .zip encontrado no repo nem em Releases. Suba o projeto como asset de uma Release, ou commite o .zip (Git LFS se > 100 MB)." }
+          Write-Host "Usando $($zip.Name) ($([math]::Round($zip.Length / 1MB, 1)) MB)"
+          Expand-Archive -Path $zip.FullName -DestinationPath "staging" -Force
+          $root = Get-ChildItem -Path "staging" -Directory -Recurse | Where-Object { Test-Path (Join-Path $_.FullName "rpcs3-ps4") } | Select-Object -First 1
+          if (-not $root) { throw "Nao encontrei uma pasta 'rpcs3-ps4' dentro do .zip extraido." }
+          $projectRoot = $root.FullName
+          $parent = Split-Path $projectRoot -Parent
+          Write-Host "PROJECT_ROOT = $projectRoot"
+          "PROJECT_ROOT=$projectRoot" >> $env:GITHUB_ENV
+          "PROJECT_PARENT=$parent" >> $env:GITHUB_ENV
+
+      - name: Baixa o OpenOrbis PS4 Toolchain v${{ env.OPENORBIS_VERSION }}
+        run: |
+          $dest = "$env:RUNNER_TEMP/OpenOrbis"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          $url = "https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v${{ env.OPENORBIS_VERSION }}/v${{ env.OPENORBIS_VERSION }}.tar.gz"
+          Write-Host "Baixando $url"
+          Invoke-WebRequest -Uri $url -OutFile "$dest/openorbis.tar.gz"
+          tar -xzf "$dest/openorbis.tar.gz" -C $dest
+          $incOrbis = Get-ChildItem -Path $dest -Recurse -Directory -Filter "orbis" | Where-Object { $_.Parent.Name -eq "include" } | Select-Object -First 1
+          if (-not $incOrbis) { throw "Nao encontrei include/orbis dentro do toolchain baixado - a estrutura do tar.gz pode ter mudado." }
+          $sdkRoot = $incOrbis.Parent.Parent.FullName
+          Write-Host "OPENORBIS_SDK = $sdkRoot"
+          "OPENORBIS_SDK=$sdkRoot" >> $env:GITHUB_ENV
+
+      - name: Baixa o llvm-mingw ${{ env.LLVM_MINGW_FLAVOR }}
+        run: |
+          $dest = "$env:RUNNER_TEMP/llvm-mingw"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/${{ env.LLVM_MINGW_VERSION }}/${{ env.LLVM_MINGW_FLAVOR }}.zip"
+          Write-Host "Baixando $url"
+          Invoke-WebRequest -Uri $url -OutFile "$dest/llvm-mingw.zip"
+          Expand-Archive -Path "$dest/llvm-mingw.zip" -DestinationPath $dest -Force
+          $bin = Join-Path $dest "${{ env.LLVM_MINGW_FLAVOR }}/bin"
+          if (-not (Test-Path "$bin/clang.exe")) { throw "clang.exe nao encontrado em $bin - confira a estrutura do zip do llvm-mingw." }
+          Write-Host "LLVM_BIN = $bin"
+          "LLVM_BIN=$bin" >> $env:GITHUB_ENV
+
+      - name: Baixa o Ninja
+        run: |
+          $dest = "$env:RUNNER_TEMP/ninja"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          Invoke-WebRequest -Uri "https://github.com/ninja-build/ninja/releases/download/v${{ env.NINJA_VERSION }}/ninja-win.zip" -OutFile "$dest/ninja.zip"
+          Expand-Archive -Path "$dest/ninja.zip" -DestinationPath $dest -Force
+          $toolsDir = "$env:PROJECT_ROOT/rpcs3-ps4/ps4-port/.build-tools"
+          New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
+          Copy-Item "$dest/ninja.exe" "$toolsDir/ninja.exe" -Force
+
+      - name: Clona o orbis-porting-kit (commit fixo do BUILDING.md)
+        run: |
+          $dest = "$env:PROJECT_PARENT/orbis-porting-kit"
+          git clone https://github.com/orbis-ports/orbis-porting-kit.git $dest
+          git -C $dest checkout ${{ env.ORBIS_PORTING_KIT_COMMIT }}
+
+      - name: Baixa o Mesa PS4 bundle (${{ env.ORBIS_MESA_TAG }})
+        run: |
+          $bundleDir = "$env:PROJECT_PARENT/orbis-mesa-bundle"
+          $meshDir = "$bundleDir/${{ env.ORBIS_MESA_TAG }}"
+          New-Item -ItemType Directory -Force -Path $meshDir | Out-Null
+          $url = "https://github.com/orbis-ports/mesa-ps4/releases/download/${{ env.ORBIS_MESA_TAG }}/${{ env.ORBIS_MESA_TAG }}.tar.gz"
+          Write-Host "Baixando $url"
+          Invoke-WebRequest -Uri $url -OutFile "$meshDir/mesa.tar.gz"
+          tar -xzf "$meshDir/mesa.tar.gz" -C $meshDir
+          "MESA_BUNDLE_DIR=$bundleDir" >> $env:GITHUB_ENV
+
+      - name: Grava o pin do submodulo do LLVM (precisa ser um git work tree)
+        working-directory: ${{ env.PROJECT_ROOT }}/rpcs3-ps4
+        run: |
+          git init -q
+          git update-index --add --cacheinfo "160000,${{ env.LLVM_SUBMODULE_PIN }},3rdparty/llvm/llvm"
+          git -c user.email="ci@local" -c user.name="CI" commit -q -m "Record RPCS3's LLVM submodule pin"
+
+      - name: Dependencias fixadas (Abseil, GNU Make)
+        working-directory: ${{ env.PROJECT_ROOT }}/rpcs3-ps4
+        run: |
+          ./ps4-port/prepare-abseil.ps1
+          ./ps4-port/prepare-make.ps1
+
+      - name: Le a versao do build (ps4_build_version.hpp)
+        working-directory: ${{ env.PROJECT_ROOT }}/rpcs3-ps4
+        run: |
+          $m = [regex]::Match((Get-Content rpcs3/util/ps4_build_version.hpp -Raw), 'ps4_build_version\[\]\s*=\s*"([0-9]+\.[0-9]{2})"')
+          if (-not $m.Success) { throw "Nao consegui ler a versao em rpcs3/util/ps4_build_version.hpp" }
+          Write-Host "PS4_VERSION = $($m.Groups[1].Value)"
+          "PS4_VERSION=$($m.Groups[1].Value)" >> $env:GITHUB_ENV
+
+      - name: Compila o LLVM pro console (passo 5 do BUILDING.md)
+        working-directory: ${{ env.PROJECT_ROOT }}/rpcs3-ps4
+        run: |
+          ./ps4-port/build-llvm.ps1 -Sdk "$env:OPENORBIS_SDK" -CompilerBin "$env:LLVM_BIN" -Jobs 4
+
+      - name: Configura o CMake (passo 6 do BUILDING.md)
+        working-directory: ${{ env.PROJECT_ROOT }}/rpcs3-ps4
+        run: |
+          cmake -S . -B ps4-port/.build-abi -G Ninja `
+            "-DCMAKE_MAKE_PROGRAM=$PWD/ps4-port/.build-tools/ninja.exe" `
+            -DRPCS3_PS4_PORT=ON `
+            -DCMAKE_TOOLCHAIN_FILE=ps4-port/toolchain.cmake `
+            "-DRPCS3_PS4_SDK=$env:OPENORBIS_SDK" "-DRPCS3_PS4_LLVM_BIN=$env:LLVM_BIN" `
+            -DRPCS3_PS4_WITH_LLVM=ON `
+            "-DRPCS3_PS4_ORBIS_COMPAT=$env:PROJECT_ROOT/orbis-compat" `
+            "-DRPCS3_PS4_PORTING_KIT=$env:PROJECT_PARENT/orbis-porting-kit" `
+            "-DRPCS3_PS4_MESA_BUNDLE=$env:MESA_BUNDLE_DIR"
+
+      - name: Compila o rpcs3_ps4_elf
+        working-directory: ${{ env.PROJECT_ROOT }}/rpcs3-ps4
+        run: |
+          cmake --build ps4-port/.build-abi --target rpcs3_ps4_elf -j 4
+
+      - name: Gera o EBOOT e o PKG (passo 7 do BUILDING.md)
+        working-directory: ${{ env.PROJECT_ROOT }}/rpcs3-ps4
+        run: |
+          ./ps4-port/package-native.ps1 -Sdk "$env:OPENORBIS_SDK" -LlvmTools "$env:LLVM_BIN" -Version "$env:PS4_VERSION"
+
+      - name: Sobe o PKG como artefato
+        uses: actions/upload-artifact@v4
+        with:
+          name: rpcs3-ps4-pkg
+          path: |
+            ${{ env.PROJECT_ROOT }}/rpcs3-ps4/ps4-port/dist/*.pkg
+            ${{ env.PROJECT_ROOT }}/rpcs3-ps4/ps4-port/dist/*.sha256
+            ${{ env.PROJECT_ROOT }}/rpcs3-ps4/ps4-port/dist/build-manifest-*.json
+          if-no-files-found: error
+          
